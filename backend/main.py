@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import json
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,14 +44,23 @@ class MeetingCreate(BaseModel):
     description: str = Field(default="", max_length=500)
     start_time: datetime | None = None
     duration_minutes: int = Field(default=40, ge=15, le=180)
+    client_id: str | None = Field(default=None, min_length=8, max_length=100)
 
 
 class ParticipantCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
+    client_id: str | None = Field(default=None, min_length=8, max_length=100)
 
 
 class LeaveRequest(BaseModel):
     participant_id: int
+
+
+class SignalCreate(BaseModel):
+    from_client_id: str = Field(min_length=8, max_length=100)
+    to_client_id: str = Field(min_length=8, max_length=100)
+    kind: Literal["offer", "answer", "ice"]
+    payload: dict
 
 
 app = FastAPI(title="Zoom Clone API", version="1.0.0")
@@ -82,7 +92,7 @@ def find_meeting(db: sqlite3.Connection, code: str) -> sqlite3.Row:
 def meeting_json(db: sqlite3.Connection, meeting: sqlite3.Row) -> dict:
     host = db.execute("SELECT display_name FROM users WHERE id = ?", (meeting["host_id"],)).fetchone()
     people = db.execute(
-        "SELECT id, display_name, role FROM participants WHERE meeting_id = ? AND left_at IS NULL ORDER BY joined_at",
+        "SELECT id, display_name, role, client_id FROM participants WHERE meeting_id = ? AND left_at IS NULL ORDER BY joined_at",
         (meeting["id"],),
     ).fetchall()
     return {
@@ -100,6 +110,24 @@ def meeting_json(db: sqlite3.Connection, meeting: sqlite3.Row) -> dict:
         "participants": [dict(person) for person in people],
         "invite_path": f"/join/{meeting['meeting_code']}",
     }
+
+
+def expire_finished_meetings(db: sqlite3.Connection) -> None:
+    """Close non-personal rooms whose scheduled duration has elapsed."""
+    now = utc_now().isoformat()
+    expired = db.execute(
+        """SELECT id FROM meetings WHERE status = 'active' AND is_personal = 0
+           AND datetime(start_time, '+' || duration_minutes || ' minutes') <= datetime(?)""",
+        (now,),
+    ).fetchall()
+    if not expired:
+        return
+    ids = [row["id"] for row in expired]
+    placeholders = ",".join("?" for _ in ids)
+    db.execute(f"UPDATE meetings SET status = 'ended' WHERE id IN ({placeholders})", ids)
+    db.execute(f"UPDATE participants SET left_at = ? WHERE meeting_id IN ({placeholders}) AND left_at IS NULL", [now, *ids])
+    db.execute(f"DELETE FROM meeting_signals WHERE meeting_id IN ({placeholders})", ids)
+    db.commit()
 
 
 def seed_database() -> None:
@@ -123,6 +151,7 @@ def seed_database() -> None:
                 duration_minutes INTEGER NOT NULL CHECK (duration_minutes BETWEEN 15 AND 180),
                 status TEXT NOT NULL CHECK (status IN ('scheduled', 'active', 'ended')),
                 is_personal INTEGER NOT NULL DEFAULT 0,
+                host_client_id TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS participants (
@@ -135,6 +164,16 @@ def seed_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS ix_meetings_start_time ON meetings(start_time);
             CREATE INDEX IF NOT EXISTS ix_participants_meeting_id ON participants(meeting_id);
+            CREATE TABLE IF NOT EXISTS meeting_signals (
+                id INTEGER PRIMARY KEY,
+                meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                from_client_id TEXT NOT NULL,
+                to_client_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('offer', 'answer', 'ice')),
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS ix_meeting_signals_recipient ON meeting_signals(meeting_id, to_client_id, id);
             """
         )
         user_columns = {column["name"] for column in db.execute("PRAGMA table_info(users)").fetchall()}
@@ -143,6 +182,12 @@ def seed_database() -> None:
         meeting_columns = {column["name"] for column in db.execute("PRAGMA table_info(meetings)").fetchall()}
         if "is_personal" not in meeting_columns:
             db.execute("ALTER TABLE meetings ADD COLUMN is_personal INTEGER NOT NULL DEFAULT 0")
+        if "host_client_id" not in meeting_columns:
+            db.execute("ALTER TABLE meetings ADD COLUMN host_client_id TEXT")
+        participant_columns = {column["name"] for column in db.execute("PRAGMA table_info(participants)").fetchall()}
+        if "client_id" not in participant_columns:
+            db.execute("ALTER TABLE participants ADD COLUMN client_id TEXT")
+        db.execute("CREATE INDEX IF NOT EXISTS ix_participants_client_active ON participants(client_id, left_at)")
 
         host = db.execute("SELECT id, display_name, personal_meeting_code FROM users ORDER BY id LIMIT 1").fetchone()
         if host is None:
@@ -218,6 +263,7 @@ def get_profile(db: sqlite3.Connection = Depends(get_db)) -> dict[str, str]:
 
 @app.get("/api/meetings")
 def list_meetings(db: sqlite3.Connection = Depends(get_db)) -> dict:
+    expire_finished_meetings(db)
     now = utc_now().isoformat()
     upcoming = db.execute(
         "SELECT * FROM meetings WHERE is_personal = 0 AND status = 'scheduled' AND start_time >= ? ORDER BY start_time ASC LIMIT 6", (now,)
@@ -230,6 +276,7 @@ def list_meetings(db: sqlite3.Connection = Depends(get_db)) -> dict:
 
 @app.post("/api/meetings", status_code=status.HTTP_201_CREATED)
 def create_meeting(payload: MeetingCreate, db: sqlite3.Connection = Depends(get_db)) -> dict:
+    expire_finished_meetings(db)
     host = db.execute("SELECT id, display_name FROM users ORDER BY id LIMIT 1").fetchone()
     if host is None:
         cursor = db.execute("INSERT INTO users (display_name) VALUES (?)", ("Vignesh V",))
@@ -243,53 +290,129 @@ def create_meeting(payload: MeetingCreate, db: sqlite3.Connection = Depends(get_
             start_time = start_time.replace(tzinfo=timezone.utc)
         if start_time <= utc_now():
             raise HTTPException(status_code=422, detail="Choose a future date and time.")
+        if payload.client_id:
+            occupied = db.execute(
+                """SELECT m.title, m.meeting_code FROM participants p JOIN meetings m ON m.id = p.meeting_id
+                   WHERE p.client_id = ? AND p.left_at IS NULL AND m.status = 'active'
+                     AND datetime(m.start_time, '+' || m.duration_minutes || ' minutes') > datetime(?)
+                     AND datetime(?) < datetime(m.start_time, '+' || m.duration_minutes || ' minutes') LIMIT 1""",
+                (payload.client_id, utc_now().isoformat(), start_time.isoformat()),
+            ).fetchone()
+            if occupied:
+                raise HTTPException(status_code=409, detail={"message": f"You are currently in '{occupied['title']}'. Leave that meeting before scheduling another one.", "meeting_code": occupied["meeting_code"], "title": occupied["title"]})
         meeting_status = "scheduled"
     else:
+        if payload.client_id:
+            occupied = db.execute(
+                """SELECT m.title, m.meeting_code FROM participants p JOIN meetings m ON m.id = p.meeting_id
+                   WHERE p.client_id = ? AND p.left_at IS NULL AND m.status = 'active' LIMIT 1""",
+                (payload.client_id,),
+            ).fetchone()
+            if occupied:
+                raise HTTPException(status_code=409, detail={"message": f"You are currently in '{occupied['title']}'. End or leave that meeting before starting another one.", "meeting_code": occupied["meeting_code"], "title": occupied["title"]})
         start_time = utc_now()
         meeting_status = "active"
 
     code = new_code(db)
     cursor = db.execute(
         """INSERT INTO meetings
-           (meeting_code, title, description, host_id, meeting_type, start_time, duration_minutes, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (meeting_code, title, description, host_id, meeting_type, start_time, duration_minutes, status, host_client_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (code, payload.title.strip() or "New meeting", payload.description.strip(), host["id"], payload.meeting_type,
-         start_time.astimezone(timezone.utc).isoformat(), payload.duration_minutes, meeting_status),
+         start_time.astimezone(timezone.utc).isoformat(), payload.duration_minutes, meeting_status, payload.client_id),
     )
     meeting_id = cursor.lastrowid
     if payload.meeting_type == "instant":
-        db.execute("INSERT INTO participants (meeting_id, display_name, role) VALUES (?, ?, 'host')", (meeting_id, host["display_name"]))
+        db.execute("INSERT INTO participants (meeting_id, display_name, role, client_id) VALUES (?, ?, 'host', ?)", (meeting_id, host["display_name"], payload.client_id))
     db.commit()
     return meeting_json(db, find_meeting(db, code))
 
 
 @app.get("/api/meetings/{meeting_code}")
 def get_meeting(meeting_code: str, db: sqlite3.Connection = Depends(get_db)) -> dict:
+    expire_finished_meetings(db)
     return meeting_json(db, find_meeting(db, meeting_code))
 
 
 @app.post("/api/meetings/{meeting_code}/participants", status_code=status.HTTP_201_CREATED)
 def join_meeting(meeting_code: str, payload: ParticipantCreate, db: sqlite3.Connection = Depends(get_db)) -> dict:
+    expire_finished_meetings(db)
     meeting = find_meeting(db, meeting_code)
     if meeting["status"] == "ended":
         raise HTTPException(status_code=409, detail="This meeting has ended.")
+    if payload.client_id:
+        already_in_this_meeting = db.execute(
+            "SELECT id, display_name, role FROM participants WHERE client_id = ? AND meeting_id = ? AND left_at IS NULL ORDER BY id LIMIT 1",
+            (payload.client_id, meeting["id"]),
+        ).fetchone()
+        if already_in_this_meeting:
+            return {"participant_id": already_in_this_meeting["id"], "display_name": already_in_this_meeting["display_name"], "role": already_in_this_meeting["role"]}
+        occupied = db.execute(
+            """SELECT m.title, m.meeting_code FROM participants p JOIN meetings m ON m.id = p.meeting_id
+               WHERE p.client_id = ? AND p.left_at IS NULL AND m.status = 'active' LIMIT 1""",
+            (payload.client_id,),
+        ).fetchone()
+        if occupied:
+            raise HTTPException(status_code=409, detail={"message": f"You are currently in '{occupied['title']}'. Leave that meeting before joining another one.", "meeting_code": occupied["meeting_code"], "title": occupied["title"]})
+    role = "host" if payload.client_id and meeting["host_client_id"] == payload.client_id else "participant"
     cursor = db.execute(
-        "INSERT INTO participants (meeting_id, display_name, role) VALUES (?, ?, 'participant')",
-        (meeting["id"], payload.display_name.strip()),
+        "INSERT INTO participants (meeting_id, display_name, role, client_id) VALUES (?, ?, ?, ?)",
+        (meeting["id"], payload.display_name.strip(), role, payload.client_id),
     )
+    db.execute("UPDATE meetings SET status = 'active' WHERE id = ? AND status = 'scheduled'", (meeting["id"],))
     db.commit()
-    return {"participant_id": cursor.lastrowid, "display_name": payload.display_name.strip(), "role": "participant"}
+    return {"participant_id": cursor.lastrowid, "display_name": payload.display_name.strip(), "role": role}
 
 
 @app.post("/api/meetings/{meeting_code}/leave")
 def leave_meeting(meeting_code: str, payload: LeaveRequest, db: sqlite3.Connection = Depends(get_db)) -> dict[str, str]:
     meeting = find_meeting(db, meeting_code)
-    participant = db.execute("SELECT id FROM participants WHERE id = ? AND meeting_id = ?", (payload.participant_id, meeting["id"])).fetchone()
+    participant = db.execute("SELECT id, client_id FROM participants WHERE id = ? AND meeting_id = ?", (payload.participant_id, meeting["id"])).fetchone()
     if participant is None:
         raise HTTPException(status_code=404, detail="Participant not found in this meeting.")
     db.execute("UPDATE participants SET left_at = ? WHERE id = ?", (utc_now().isoformat(), payload.participant_id))
+    if participant["client_id"]:
+        db.execute("DELETE FROM meeting_signals WHERE meeting_id = ? AND (from_client_id = ? OR to_client_id = ?)", (meeting["id"], participant["client_id"], participant["client_id"]))
     db.commit()
     return {"status": "left"}
+
+
+@app.post("/api/meetings/{meeting_code}/signals", status_code=status.HTTP_201_CREATED)
+def create_meeting_signal(meeting_code: str, payload: SignalCreate, db: sqlite3.Connection = Depends(get_db)) -> dict[str, int]:
+    meeting = find_meeting(db, meeting_code)
+    if meeting["status"] == "ended":
+        raise HTTPException(status_code=409, detail="This meeting has ended.")
+    active_clients = {
+        row["client_id"] for row in db.execute(
+            "SELECT client_id FROM participants WHERE meeting_id = ? AND left_at IS NULL AND client_id IN (?, ?)",
+            (meeting["id"], payload.from_client_id, payload.to_client_id),
+        ).fetchall()
+    }
+    if payload.from_client_id not in active_clients or payload.to_client_id not in active_clients:
+        raise HTTPException(status_code=403, detail="Both participants must be in the meeting to exchange media.")
+    cursor = db.execute(
+        "INSERT INTO meeting_signals (meeting_id, from_client_id, to_client_id, kind, payload) VALUES (?, ?, ?, ?, ?)",
+        (meeting["id"], payload.from_client_id, payload.to_client_id, payload.kind, json.dumps(payload.payload)),
+    )
+    db.commit()
+    return {"signal_id": cursor.lastrowid}
+
+
+@app.get("/api/meetings/{meeting_code}/signals")
+def get_meeting_signals(meeting_code: str, client_id: str, after_id: int = 0, db: sqlite3.Connection = Depends(get_db)) -> dict:
+    meeting = find_meeting(db, meeting_code)
+    participant = db.execute(
+        "SELECT 1 FROM participants WHERE meeting_id = ? AND client_id = ? AND left_at IS NULL LIMIT 1",
+        (meeting["id"], client_id),
+    ).fetchone()
+    if participant is None:
+        raise HTTPException(status_code=403, detail="Join the meeting before receiving media signals.")
+    signals = db.execute(
+        """SELECT id, from_client_id, to_client_id, kind, payload FROM meeting_signals
+           WHERE meeting_id = ? AND to_client_id = ? AND id > ? ORDER BY id LIMIT 100""",
+        (meeting["id"], client_id, after_id),
+    ).fetchall()
+    return {"signals": [{**dict(signal), "payload": json.loads(signal["payload"])} for signal in signals]}
 
 
 @app.post("/api/meetings/{meeting_code}/end")
@@ -297,5 +420,6 @@ def end_meeting(meeting_code: str, db: sqlite3.Connection = Depends(get_db)) -> 
     meeting = find_meeting(db, meeting_code)
     db.execute("UPDATE meetings SET status = 'ended' WHERE id = ?", (meeting["id"],))
     db.execute("UPDATE participants SET left_at = ? WHERE meeting_id = ? AND left_at IS NULL", (utc_now().isoformat(), meeting["id"]))
+    db.execute("DELETE FROM meeting_signals WHERE meeting_id = ?", (meeting["id"],))
     db.commit()
     return {"status": "ended"}

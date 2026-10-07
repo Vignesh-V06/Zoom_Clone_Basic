@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { createMeeting, formatMeetingTime, getDashboard, getProfile, type DashboardData, type Meeting, type Profile } from "@/lib/api";
+import { createMeeting, formatMeetingTime, getClientId, getDashboard, getProfile, MeetingConflictError, type DashboardData, type Meeting, type Profile } from "@/lib/api";
 import { CopyIcon, EmptyRecentIcon, HostIcon, JoinIcon, ScheduleIcon } from "@/components/DashboardIcons";
 
 function MeetingRow({ meeting, onJoin, recent = false }: { meeting: Meeting; onJoin: (meeting: Meeting) => void; recent?: boolean }) {
@@ -25,8 +25,8 @@ export default function HomePage() {
   }, []);
   async function hostNow() {
     setWorking(true); setError("");
-    try { const meeting = await createMeeting({ meeting_type: "instant", title: "New meeting" }); sessionStorage.setItem(`zoom-host-${meeting.meeting_code}`, "true"); router.push(`/meeting/${encodeURIComponent(meeting.meeting_code)}`); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Couldn't start the meeting."); setWorking(false); }
+    try { const meeting = await createMeeting({ meeting_type: "instant", title: "New meeting", client_id: getClientId() }); sessionStorage.setItem(`zoom-host-${meeting.meeting_code}`, "true"); sessionStorage.setItem(`zoom-mode-${meeting.meeting_code}`, "video-on"); router.push(`/meeting/${encodeURIComponent(meeting.meeting_code)}`); }
+    catch (cause) { if (!(cause instanceof MeetingConflictError)) setError(cause instanceof Error ? cause.message : "Couldn't start the meeting."); setWorking(false); }
   }
   function openMeeting(meeting: Meeting) { router.push(`/join/${encodeURIComponent(meeting.meeting_code)}`); }
   async function copyPersonalId() {
