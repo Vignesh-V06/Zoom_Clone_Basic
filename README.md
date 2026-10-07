@@ -34,7 +34,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. The SQLite database is stored at `backend/zoom_clone.db`; its default host and sample meetings are seeded automatically on first API start. The API enables cross-thread SQLite access for its request-scoped connections, as required by FastAPI's synchronous route workers. For deployment, set `NEXT_PUBLIC_API_URL` in the frontend to the public API URL and set `FRONTEND_ORIGINS` in the backend to the frontend origin (comma-separated if there are multiple).
+Open `http://localhost:3000`. The SQLite database is stored at `backend/zoom_clone.db`; its default host and sample meetings are seeded automatically on first API start. The API enables cross-thread SQLite access for its request-scoped connections, as required by FastAPI's synchronous route workers. For deployment, set `NEXT_PUBLIC_API_URL` in the frontend to the public API URL and set `FRONTEND_ORIGINS` in the backend to the frontend origin (comma-separated if there are multiple). The included Render blueprint starts the API on Render's free plan. Free instances have an ephemeral filesystem, so the SQLite meeting data is reset when the service restarts or redeploys. For durable production data, attach a persistent disk and set `DATABASE_PATH=/var/data/zoom_clone.db` in Render (persistent disks require a paid service).
 
 ## Data model
 

@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 
-DATABASE_PATH = Path(__file__).with_name("zoom_clone.db")
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(Path(__file__).with_name("zoom_clone.db"))))
 
 
 def connect_db() -> sqlite3.Connection:
