@@ -1,6 +1,6 @@
 # Zoom Clone MVP
 
-A Zoom-inspired meeting app built with Next.js, FastAPI, and SQLite. It supports a seeded dashboard, instant meeting creation, scheduling, joining by meeting ID or invite link, and a simple meeting room. Video tiles and media controls are interface placeholders; live audio/video calling is outside this MVP.
+A Zoom-inspired meeting app built with Next.js, FastAPI, and SQLite. It supports a seeded dashboard, instant meeting creation, scheduling, joining by meeting ID or invite link, and a meeting room with browser-based peer-to-peer audio/video and screen sharing. Chat, reactions, and advanced host tools are visual placeholders.
 
 ## Requirements
 
@@ -34,7 +34,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. The SQLite database is stored at `backend/zoom_clone.db`; its default host and sample meetings are seeded automatically on first API start. The API enables cross-thread SQLite access for its request-scoped connections, as required by FastAPI's synchronous route workers.
+Open `http://localhost:3000`. The SQLite database is stored at `backend/zoom_clone.db`; its default host and sample meetings are seeded automatically on first API start. The API enables cross-thread SQLite access for its request-scoped connections, as required by FastAPI's synchronous route workers. For deployment, set `NEXT_PUBLIC_API_URL` in the frontend to the public API URL and set `FRONTEND_ORIGINS` in the backend to the frontend origin (comma-separated if there are multiple).
 
 ## Data model
 
@@ -56,10 +56,13 @@ The relationships are one user to many meetings and one meeting to many particip
 | `POST` | `/api/meetings/{meeting_code}/participants` | Join a meeting with a display name. |
 | `POST` | `/api/meetings/{meeting_code}/leave` | Record a participant leaving. |
 | `POST` | `/api/meetings/{meeting_code}/end` | End a meeting from the host room. |
+| `POST` | `/api/meetings/{meeting_code}/signals` | Exchange WebRTC offer, answer, and ICE messages between active participants. |
+| `GET` | `/api/meetings/{meeting_code}/signals` | Poll for WebRTC signaling messages addressed to the current participant. |
 
 ## Notes
 
 - The Host actions in the top navigation and dashboard both create an instant meeting and open its room.
 - Profile-menu actions are visible placeholders and do not require account APIs.
 - Meetings use generated public codes; database integer IDs stay internal.
+- Peer-to-peer media uses a public STUN server. Networks that require a TURN relay may not connect, and media depends on browser camera/microphone permissions.
 - Use `npm run build` from `frontend/` to create a production frontend build. For this local MVP, run the API and frontend as separate processes.

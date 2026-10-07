@@ -23,6 +23,8 @@ export default function SchedulePage() {
     const detectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const availableTimezones = intlWithTimezones.supportedValuesOf?.("timeZone") ?? [detectedTimezone];
     if (detectedTimezone && !availableTimezones.includes(detectedTimezone)) availableTimezones.push(detectedTimezone);
+    // Read the browser's IANA time-zone list after hydration to avoid server/client locale mismatches.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTimezones(availableTimezones.sort((left, right) => left.localeCompare(right)));
     setTimezone(detectedTimezone || availableTimezones[0] || "");
     setMinimumDate(new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 10));

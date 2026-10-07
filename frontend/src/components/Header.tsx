@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
@@ -27,7 +28,7 @@ export default function Header() {
   return <>
     <header className="topbar">
       <Link href="/" className="brand" aria-label="Zoom home">
-        <img src="/zoom-logo.svg" alt="Zoom" width="137" height="32" />
+        <Image src="/zoom-logo.svg" alt="Zoom" width={137} height={32} priority />
       </Link>
       <nav className="topnav" aria-label="Main navigation">
         <Link href="/schedule">Schedule</Link><Link href="/join">Join</Link>

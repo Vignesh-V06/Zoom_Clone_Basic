@@ -1,5 +1,6 @@
 "use client";
 import { useParams, useRouter } from "next/navigation";
+import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { endMeeting, formatMeetingTime, getClientId, getMeeting, getMeetingSignals, leaveMeeting, sendMeetingSignal, type Meeting, type MeetingSignal } from "@/lib/api";
 import { MeetingIcon } from "@/components/MeetingIcons";
@@ -54,8 +55,11 @@ export default function MeetingRoomPage() {
   }
 
   useEffect(() => {
+    const effectPeerLinks = peerLinks.current;
     const host = sessionStorage.getItem(`zoom-host-${code}`) === "true";
     const startMode = (sessionStorage.getItem(`zoom-mode-${code}`) as StartMode | null) || "video-off";
+    // Browser session state is only available after hydration; initialize the room from that client state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsHost(host);
     setMode(startMode);
     setPreviewOpen(host && startMode === "video-on");
@@ -162,8 +166,8 @@ export default function MeetingRoomPage() {
       disposed = true;
       window.clearInterval(refreshTimer);
       mediaStream.current?.getTracks().forEach((track) => track.stop());
-      for (const link of peerLinks.current.values()) link.connection.close();
-      peerLinks.current.clear();
+      for (const link of effectPeerLinks.values()) link.connection.close();
+      effectPeerLinks.clear();
     };
   }, [code]);
 
@@ -187,13 +191,19 @@ export default function MeetingRoomPage() {
     setError("");
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      mediaStream.current?.getTracks().forEach((track) => track.stop());
-      mediaStream.current = stream;
+      const currentStream = mediaStream.current ?? new MediaStream();
+      currentStream.getVideoTracks().forEach((track) => { track.stop(); currentStream.removeTrack(track); });
+      stream.getVideoTracks().forEach((track) => currentStream.addTrack(track));
+      mediaStream.current = currentStream;
       setCameraOn(true);
       setPreviewOpen(false);
-      if (selfVideo.current) selfVideo.current.srcObject = stream;
+      if (selfVideo.current) selfVideo.current.srcObject = currentStream;
       syncLocalTracks();
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => { setCameraOn(false); syncLocalTracks(); }, { once: true });
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        stream.getVideoTracks().forEach((track) => { currentStream.removeTrack(track); });
+        setCameraOn(false);
+        syncLocalTracks();
+      }, { once: true });
     } catch {
       setError("Screen sharing was cancelled or is unavailable in this browser.");
     }
@@ -250,7 +260,7 @@ export default function MeetingRoomPage() {
   const title = meeting?.title ?? "Zoom Meeting";
   const otherParticipants = (meeting?.participants ?? []).filter((person) => person.client_id ? person.client_id !== clientId : person.id !== ownParticipantId);
   return <div className="zoom-room-app">
-    <header className="room-appbar"><div className="room-workplace-brand"><img src="/zoom-logo.svg" alt="Zoom" /><span /> <strong>Workplace</strong></div><nav><button>Discover Products <MeetingIcon name="caret" size={15} className="room-nav-caret" /></button><button>Pricing</button></nav><div className="room-appbar-right"><button>Admin Center</button><button className="room-download">Download</button><button className="room-upgrade">Upgrade</button><span className="room-user-avatar">V</span></div></header>
+    <header className="room-appbar"><div className="room-workplace-brand"><Image src="/zoom-logo.svg" alt="Zoom" width={109} height={26} /><span /> <strong>Workplace</strong></div><nav><button>Discover Products <MeetingIcon name="caret" size={15} className="room-nav-caret" /></button><button>Pricing</button></nav><div className="room-appbar-right"><button>Admin Center</button><button className="room-download">Download</button><button className="room-upgrade">Upgrade</button><span className="room-user-avatar">V</span></div></header>
     <div className="room-layout">
       <aside className="room-sidebar" aria-label="Workspace navigation"><button><span className="room-sidebar-icon"><MeetingIcon name="home" /></span>Home</button><button><span className="room-sidebar-icon"><MeetingIcon name="chat" /></span>Chat</button><button className="selected"><span className="room-sidebar-icon"><MeetingIcon name="meeting" /></span>Meetings</button><button><span className="room-sidebar-icon"><MeetingIcon name="contacts" /></span>Contacts</button><button className="room-settings"><span className="room-sidebar-icon"><MeetingIcon name="settings" /></span>Settings</button></aside>
       <section className="room-workspace">
