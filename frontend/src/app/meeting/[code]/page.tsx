@@ -2,7 +2,7 @@
 import { useParams, useRouter } from "next/navigation";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
-import { endMeeting, formatMeetingTime, getClientId, getMeeting, getMeetingSignals, leaveMeeting, sendMeetingSignal, type Meeting, type MeetingSignal } from "@/lib/api";
+import { endMeeting, formatMeetingTime, getClientId, getMeeting, getMeetingIceServers, getMeetingSignals, leaveMeeting, sendMeetingSignal, type Meeting, type MeetingSignal } from "@/lib/api";
 import { MeetingIcon } from "@/components/MeetingIcons";
 
 type StartMode = "video-on" | "video-off" | "screen-share";
@@ -29,6 +29,7 @@ export default function MeetingRoomPage() {
   const clientIdRef = useRef("");
   const signalCursor = useRef(0);
   const pendingCandidates = useRef(new Map<string, RTCIceCandidateInit[]>());
+  const iceServers = useRef<RTCIceServer[]>([{ urls: "stun:stun.l.google.com:19302" }]);
   const polling = useRef(false);
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [isHost, setIsHost] = useState(false);
@@ -41,6 +42,7 @@ export default function MeetingRoomPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [inviteCopied, setInviteCopied] = useState(false);
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
   const [clientId, setClientId] = useState("");
 
@@ -69,6 +71,9 @@ export default function MeetingRoomPage() {
     clientIdRef.current = clientId;
     setClientId(clientId);
     let disposed = false;
+    const iceServersReady = getMeetingIceServers(code, clientId)
+      .then((config) => { if (!disposed && config.ice_servers.length) iceServers.current = config.ice_servers; })
+      .catch(() => undefined);
     async function processSignal(signal: MeetingSignal) {
       let link = peerLinks.current.get(signal.from_client_id);
       if (!link) link = createPeerLink(signal.from_client_id);
@@ -96,7 +101,7 @@ export default function MeetingRoomPage() {
     }
 
     function createPeerLink(remoteClientId: string): PeerLink {
-      const connection = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      const connection = new RTCPeerConnection({ iceServers: iceServers.current });
       const audioSender = connection.addTransceiver("audio", { direction: "sendrecv" }).sender;
       const videoSender = connection.addTransceiver("video", { direction: "sendrecv" }).sender;
       const link = { connection, audioSender, videoSender };
@@ -106,6 +111,11 @@ export default function MeetingRoomPage() {
         const stream = event.streams[0] ?? streamForRemote;
         if (!event.streams[0] && !stream.getTracks().some((track) => track.id === event.track.id)) stream.addTrack(event.track);
         setRemoteStreams((current) => ({ ...current, [remoteClientId]: stream }));
+      };
+      connection.onconnectionstatechange = () => {
+        if (!disposed && connection.connectionState === "failed") {
+          setError("A media connection failed. This network may require a TURN relay; ask the host to retry.");
+        }
       };
       connection.onicecandidate = (event) => {
         if (event.candidate) void sendMeetingSignal(code, clientId, remoteClientId, "ice", event.candidate.toJSON()).catch(() => undefined);
@@ -118,6 +128,7 @@ export default function MeetingRoomPage() {
       if (disposed || polling.current) return;
       polling.current = true;
       try {
+        await iceServersReady;
         const currentMeeting = await getMeeting(code);
         if (disposed) return;
         setMeeting(currentMeeting);
@@ -151,7 +162,11 @@ export default function MeetingRoomPage() {
         const result = await getMeetingSignals(code, clientId, signalCursor.current);
         for (const signal of result.signals) {
           signalCursor.current = Math.max(signalCursor.current, signal.id);
-          try { await processSignal(signal); } catch { /* A later signaling poll can retry after peer state settles. */ }
+          try { await processSignal(signal); }
+          catch (cause) {
+            console.error("WebRTC signal negotiation failed", cause);
+            if (!disposed) setError("Couldn't negotiate a media connection. Please leave and rejoin the meeting.");
+          }
         }
       } catch {
         // Keep an established call alive through brief signaling-service interruptions.
@@ -258,6 +273,12 @@ export default function MeetingRoomPage() {
   }
 
   const title = meeting?.title ?? "Zoom Meeting";
+  const participantCount = Math.max(meeting?.participant_count ?? 0, meeting?.participants.length ?? 0, ownParticipantId || isHost ? 1 : 0);
+  async function copyInviteLink() {
+    const inviteUrl = `${window.location.origin}${meeting?.invite_path ?? `/join/${encodeURIComponent(code)}`}`;
+    try { await navigator.clipboard.writeText(inviteUrl); setInviteCopied(true); window.setTimeout(() => setInviteCopied(false), 1800); }
+    catch { setError(`Copy this invite link: ${inviteUrl}`); }
+  }
   const otherParticipants = (meeting?.participants ?? []).filter((person) => person.client_id ? person.client_id !== clientId : person.id !== ownParticipantId);
   return <div className="zoom-room-app">
     <header className="room-appbar"><div className="room-workplace-brand"><Image src="/zoom-logo.svg" alt="Zoom" width={109} height={26} /><span /> <strong>Workplace</strong></div><nav><button>Discover Products <MeetingIcon name="caret" size={15} className="room-nav-caret" /></button><button>Pricing</button></nav><div className="room-appbar-right"><button>Admin Center</button><button className="room-download">Download</button><button className="room-upgrade">Upgrade</button><span className="room-user-avatar">V</span></div></header>
@@ -286,7 +307,7 @@ export default function MeetingRoomPage() {
           </div>
           {previewOpen && <div className="camera-preview-backdrop"><section className="camera-preview-card"><div className="preview-illustration"><span className="preview-camera-icon"><MeetingIcon name="video" size={27} /></span><div className="preview-person">V</div><span className="preview-people"><MeetingIcon name="participants" size={27} /></span></div><h1>Do you want people to see you in the meeting?</h1><p>You can still turn off your microphone and camera anytime in the meeting</p><button className="preview-enable" onClick={enableCameraAndMic}><MeetingIcon name="video" size={20} /> Use microphone and camera</button><button className="preview-continue" onClick={() => setPreviewOpen(false)}>Continue without microphone and camera</button></section></div>}
           {mode === "screen-share" && !previewOpen && !cameraOn && <div className="screen-share-prompt"><strong>Screen Share Only</strong><span>Share a window or your entire screen to begin.</span><button onClick={startScreenShare}>Share screen</button></div>}
-          {detailsOpen && <aside className="room-details-popover"><button aria-label="Close meeting details" onClick={() => setDetailsOpen(false)}><MeetingIcon name="close" size={18} /></button><strong>{title}</strong><span>Meeting ID: {code}</span><span>{meeting ? formatMeetingTime(meeting.start_time) : "Loading…"}</span><span>{meeting?.participant_count ?? 1} participant{meeting?.participant_count === 1 ? "" : "s"}</span></aside>}
+          {detailsOpen && <aside className="room-details-popover"><button className="room-details-close" aria-label="Close meeting details" onClick={() => setDetailsOpen(false)}><MeetingIcon name="close" size={18} /></button><strong>{title}</strong><span>Meeting ID: {code}</span><span>{meeting ? formatMeetingTime(meeting.start_time) : "Loading…"}</span><span>{participantCount} participant{participantCount === 1 ? "" : "s"}</span><button className="room-invite-copy" onClick={copyInviteLink}>{inviteCopied ? "Invite link copied" : "Copy invite link"}</button></aside>}
         </div>
         <div className="zoom-meeting-toolbar">
           <div className="room-toolbar-left">
@@ -294,7 +315,7 @@ export default function MeetingRoomPage() {
             <div className="room-control-group"><button className="zoom-control" onClick={toggleCamera} aria-label={cameraOn ? "Stop video" : "Start video"}><span><MeetingIcon name="video" muted={!cameraOn} /></span><small>{cameraOn ? "Stop Video" : "Start Video"}</small></button><button className="control-caret" aria-label="Video settings" onClick={() => setError("Choose your camera in browser site settings.")}><MeetingIcon name="caret" size={14} /></button></div>
           </div>
           <div className="room-toolbar-center">
-            <button className="zoom-control" onClick={() => setDetailsOpen(!detailsOpen)}><span><MeetingIcon name="participants" /></span><small>Participants <b>{meeting?.participant_count ?? 1}</b></small></button>
+            <button className="zoom-control" onClick={() => setDetailsOpen(!detailsOpen)}><span><MeetingIcon name="participants" /></span><small>Participants <b>{participantCount}</b></small></button>
             <button className="zoom-control" onClick={() => setError("Meeting chat is a visual placeholder in this MVP.")}><span><MeetingIcon name="chat" /></span><small>Chat</small></button>
             <button className="zoom-control" onClick={() => setError("Reactions are a visual placeholder in this MVP.")}><span><MeetingIcon name="react" /></span><small>React</small></button>
             <button className="zoom-control" onClick={startScreenShare}><span><MeetingIcon name="share" /></span><small>Share</small></button>

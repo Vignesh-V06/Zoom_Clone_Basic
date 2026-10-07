@@ -4,7 +4,7 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { createMeeting, getClientId, MeetingConflictError } from "@/lib/api";
+import { createMeeting, getClientId, getDeviceId, MeetingConflictError } from "@/lib/api";
 import { ChevronDownIcon } from "@/components/DashboardIcons";
 
 export default function Header() {
@@ -19,7 +19,7 @@ export default function Header() {
     setHostMenuOpen(false);
     setStarting(true); setMessage("");
     try {
-      const meeting = await createMeeting({ meeting_type: "instant", title: "New meeting", client_id: getClientId() });
+      const meeting = await createMeeting({ meeting_type: "instant", title: "New meeting", client_id: getClientId(), device_id: getDeviceId() });
       sessionStorage.setItem(`zoom-host-${meeting.meeting_code}`, "true");
       sessionStorage.setItem(`zoom-mode-${meeting.meeting_code}`, mode);
       router.push(`/meeting/${encodeURIComponent(meeting.meeting_code)}`);

@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useState } from "react";
-import { createMeeting, getClientId, MeetingConflictError } from "@/lib/api";
+import { createMeeting, getClientId, getDeviceId, MeetingConflictError } from "@/lib/api";
 
 export default function SchedulePage() {
   const router = useRouter();
@@ -62,6 +62,7 @@ export default function SchedulePage() {
         start_time: getScheduledInstantISO(),
         duration_minutes: duration,
         client_id: getClientId(),
+        device_id: getDeviceId(),
       });
       router.push(`/?scheduled=${encodeURIComponent(meeting.meeting_code)}`);
     } catch (cause) {

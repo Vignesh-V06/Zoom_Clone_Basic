@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import secrets
 import sqlite3
 import json
@@ -46,11 +49,13 @@ class MeetingCreate(BaseModel):
     start_time: datetime | None = None
     duration_minutes: int = Field(default=40, ge=15, le=180)
     client_id: str | None = Field(default=None, min_length=8, max_length=100)
+    device_id: str | None = Field(default=None, min_length=8, max_length=100)
 
 
 class ParticipantCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     client_id: str | None = Field(default=None, min_length=8, max_length=100)
+    device_id: str | None = Field(default=None, min_length=8, max_length=100)
 
 
 class LeaveRequest(BaseModel):
@@ -166,7 +171,9 @@ def seed_database() -> None:
                 display_name TEXT NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('host', 'participant')),
                 joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                left_at TEXT
+                left_at TEXT,
+                client_id TEXT,
+                device_id TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_meetings_start_time ON meetings(start_time);
             CREATE INDEX IF NOT EXISTS ix_participants_meeting_id ON participants(meeting_id);
@@ -193,6 +200,8 @@ def seed_database() -> None:
         participant_columns = {column["name"] for column in db.execute("PRAGMA table_info(participants)").fetchall()}
         if "client_id" not in participant_columns:
             db.execute("ALTER TABLE participants ADD COLUMN client_id TEXT")
+        if "device_id" not in participant_columns:
+            db.execute("ALTER TABLE participants ADD COLUMN device_id TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS ix_participants_client_active ON participants(client_id, left_at)")
 
         host = db.execute("SELECT id, display_name, personal_meeting_code FROM users ORDER BY id LIMIT 1").fetchone()
@@ -271,11 +280,17 @@ def get_profile(db: sqlite3.Connection = Depends(get_db)) -> dict[str, str]:
 def list_meetings(db: sqlite3.Connection = Depends(get_db)) -> dict:
     expire_finished_meetings(db)
     now = utc_now().isoformat()
+    # Keep scheduled meetings visible through their full duration after the start
+    # time, and keep a live meeting in the Upcoming card while it is in progress.
     upcoming = db.execute(
-        "SELECT * FROM meetings WHERE is_personal = 0 AND status = 'scheduled' AND start_time >= ? ORDER BY start_time ASC LIMIT 6", (now,)
+        """SELECT * FROM meetings WHERE is_personal = 0 AND (
+               (status = 'scheduled' AND datetime(start_time, '+' || duration_minutes || ' minutes') > datetime(?))
+               OR (status = 'active' AND datetime(start_time, '+' || duration_minutes || ' minutes') > datetime(?))
+           ) ORDER BY start_time ASC LIMIT 6""",
+        (now, now),
     ).fetchall()
     recent = db.execute(
-        "SELECT * FROM meetings WHERE is_personal = 0 AND status IN ('ended', 'active') ORDER BY start_time DESC LIMIT 6"
+        "SELECT * FROM meetings WHERE is_personal = 0 AND status = 'ended' ORDER BY start_time DESC LIMIT 6"
     ).fetchall()
     return {"upcoming": [meeting_json(db, row) for row in upcoming], "recent": [meeting_json(db, row) for row in recent]}
 
@@ -296,23 +311,23 @@ def create_meeting(payload: MeetingCreate, db: sqlite3.Connection = Depends(get_
             start_time = start_time.replace(tzinfo=timezone.utc)
         if start_time <= utc_now():
             raise HTTPException(status_code=422, detail="Choose a future date and time.")
-        if payload.client_id:
+        if payload.client_id or payload.device_id:
             occupied = db.execute(
                 """SELECT m.title, m.meeting_code FROM participants p JOIN meetings m ON m.id = p.meeting_id
-                   WHERE p.client_id = ? AND p.left_at IS NULL AND m.status = 'active'
+                   WHERE (p.device_id = ? OR p.client_id = ?) AND p.left_at IS NULL AND m.status = 'active'
                      AND datetime(m.start_time, '+' || m.duration_minutes || ' minutes') > datetime(?)
                      AND datetime(?) < datetime(m.start_time, '+' || m.duration_minutes || ' minutes') LIMIT 1""",
-                (payload.client_id, utc_now().isoformat(), start_time.isoformat()),
+                (payload.device_id or payload.client_id, payload.client_id, utc_now().isoformat(), start_time.isoformat()),
             ).fetchone()
             if occupied:
                 raise HTTPException(status_code=409, detail={"message": f"You are currently in '{occupied['title']}'. Leave that meeting before scheduling another one.", "meeting_code": occupied["meeting_code"], "title": occupied["title"]})
         meeting_status = "scheduled"
     else:
-        if payload.client_id:
+        if payload.client_id or payload.device_id:
             occupied = db.execute(
                 """SELECT m.title, m.meeting_code FROM participants p JOIN meetings m ON m.id = p.meeting_id
-                   WHERE p.client_id = ? AND p.left_at IS NULL AND m.status = 'active' LIMIT 1""",
-                (payload.client_id,),
+                   WHERE (p.device_id = ? OR p.client_id = ?) AND p.left_at IS NULL AND m.status = 'active' LIMIT 1""",
+                (payload.device_id or payload.client_id, payload.client_id),
             ).fetchone()
             if occupied:
                 raise HTTPException(status_code=409, detail={"message": f"You are currently in '{occupied['title']}'. End or leave that meeting before starting another one.", "meeting_code": occupied["meeting_code"], "title": occupied["title"]})
@@ -329,7 +344,7 @@ def create_meeting(payload: MeetingCreate, db: sqlite3.Connection = Depends(get_
     )
     meeting_id = cursor.lastrowid
     if payload.meeting_type == "instant":
-        db.execute("INSERT INTO participants (meeting_id, display_name, role, client_id) VALUES (?, ?, 'host', ?)", (meeting_id, host["display_name"], payload.client_id))
+        db.execute("INSERT INTO participants (meeting_id, display_name, role, client_id, device_id) VALUES (?, ?, 'host', ?, ?)", (meeting_id, host["display_name"], payload.client_id, payload.device_id))
     db.commit()
     return meeting_json(db, find_meeting(db, code))
 
@@ -355,15 +370,15 @@ def join_meeting(meeting_code: str, payload: ParticipantCreate, db: sqlite3.Conn
             return {"participant_id": already_in_this_meeting["id"], "display_name": already_in_this_meeting["display_name"], "role": already_in_this_meeting["role"]}
         occupied = db.execute(
             """SELECT m.title, m.meeting_code FROM participants p JOIN meetings m ON m.id = p.meeting_id
-               WHERE p.client_id = ? AND p.left_at IS NULL AND m.status = 'active' LIMIT 1""",
-            (payload.client_id,),
+               WHERE (p.device_id = ? OR p.client_id = ?) AND p.left_at IS NULL AND m.status = 'active' AND m.id != ? LIMIT 1""",
+            (payload.device_id or payload.client_id, payload.client_id, meeting["id"]),
         ).fetchone()
         if occupied:
             raise HTTPException(status_code=409, detail={"message": f"You are currently in '{occupied['title']}'. Leave that meeting before joining another one.", "meeting_code": occupied["meeting_code"], "title": occupied["title"]})
     role = "host" if payload.client_id and meeting["host_client_id"] == payload.client_id else "participant"
     cursor = db.execute(
-        "INSERT INTO participants (meeting_id, display_name, role, client_id) VALUES (?, ?, ?, ?)",
-        (meeting["id"], payload.display_name.strip(), role, payload.client_id),
+        "INSERT INTO participants (meeting_id, display_name, role, client_id, device_id) VALUES (?, ?, ?, ?, ?)",
+        (meeting["id"], payload.display_name.strip(), role, payload.client_id, payload.device_id),
     )
     db.execute("UPDATE meetings SET status = 'active' WHERE id = ? AND status = 'scheduled'", (meeting["id"],))
     db.commit()
@@ -419,6 +434,43 @@ def get_meeting_signals(meeting_code: str, client_id: str, after_id: int = 0, db
         (meeting["id"], client_id, after_id),
     ).fetchall()
     return {"signals": [{**dict(signal), "payload": json.loads(signal["payload"])} for signal in signals]}
+
+
+@app.get("/api/meetings/{meeting_code}/ice-servers")
+def get_meeting_ice_servers(meeting_code: str, client_id: str, db: sqlite3.Connection = Depends(get_db)) -> dict:
+    """Return ICE servers only to a participant in this meeting.
+
+    TURN can use coturn REST shared-secret auth so each participant receives
+    a short-lived credential instead of a permanent shared password.
+    """
+    meeting = find_meeting(db, meeting_code)
+    participant = db.execute(
+        "SELECT 1 FROM participants WHERE meeting_id = ? AND client_id = ? AND left_at IS NULL LIMIT 1",
+        (meeting["id"], client_id),
+    ).fetchone()
+    if participant is None:
+        raise HTTPException(status_code=403, detail="Join the meeting before requesting media servers.")
+
+    ice_servers: list[dict] = [{"urls": "stun:stun.l.google.com:19302"}]
+    turn_urls = [value.strip() for value in os.getenv("TURN_URLS", "").split(",") if value.strip()]
+    if turn_urls:
+        turn_server: dict = {"urls": turn_urls}
+        shared_secret = os.getenv("TURN_SHARED_SECRET", "")
+        static_username = os.getenv("TURN_USERNAME", "")
+        static_credential = os.getenv("TURN_CREDENTIAL", "")
+        if shared_secret:
+            expires_at = int(utc_now().timestamp()) + 3600
+            username = f"{expires_at}:{client_id}"
+            credential = base64.b64encode(
+                hmac.new(shared_secret.encode(), username.encode(), hashlib.sha1).digest()
+            ).decode()
+            turn_server.update({"username": username, "credential": credential})
+        elif static_username and static_credential:
+            turn_server.update({"username": static_username, "credential": static_credential})
+        if "username" in turn_server:
+            ice_servers.append(turn_server)
+
+    return {"ice_servers": ice_servers}
 
 
 @app.post("/api/meetings/{meeting_code}/end")

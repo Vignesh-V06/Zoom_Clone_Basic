@@ -58,11 +58,13 @@ The relationships are one user to many meetings and one meeting to many particip
 | `POST` | `/api/meetings/{meeting_code}/end` | End a meeting from the host room. |
 | `POST` | `/api/meetings/{meeting_code}/signals` | Exchange WebRTC offer, answer, and ICE messages between active participants. |
 | `GET` | `/api/meetings/{meeting_code}/signals` | Poll for WebRTC signaling messages addressed to the current participant. |
+| `GET` | `/api/meetings/{meeting_code}/ice-servers` | Return STUN/TURN configuration to an active participant. |
 
 ## Notes
 
 - The Host actions in the top navigation and dashboard both create an instant meeting and open its room.
 - Profile-menu actions are visible placeholders and do not require account APIs.
 - Meetings use generated public codes; database integer IDs stay internal.
-- Peer-to-peer media uses a public STUN server. Networks that require a TURN relay may not connect, and media depends on browser camera/microphone permissions.
+- Peer-to-peer WebRTC media uses a public STUN server by default. To support restrictive NAT/firewall networks, configure a TURN provider that supports coturn REST shared-secret authentication on the backend: set TURN_URLS to a comma-separated list of turn:/turns: URLs and TURN_SHARED_SECRET to the provider secret. The API issues one-hour credentials to active meeting participants; keep the shared secret only on the backend. Without a TURN relay, some network pairs cannot connect. The current peer mesh is intended for small meetings, not Zoom-scale rooms.
+- Camera and microphone transmission also requires each participant to grant browser permission. Screen sharing uses the browser's screen-share prompt.
 - Use `npm run build` from `frontend/` to create a production frontend build. For this local MVP, run the API and frontend as separate processes.

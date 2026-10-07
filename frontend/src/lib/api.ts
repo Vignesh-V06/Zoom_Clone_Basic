@@ -46,27 +46,38 @@ export type Profile = { display_name: string; personal_meeting_code: string };
 export const getDashboard = () => request<DashboardData>("/api/meetings");
 export const getProfile = () => request<Profile>("/api/profile");
 export const getMeeting = (code: string) => request<Meeting>(`/api/meetings/${encodeURIComponent(code)}`);
-export const createMeeting = (input: { meeting_type: "instant" | "scheduled"; title?: string; description?: string; start_time?: string; duration_minutes?: number; client_id?: string }) =>
+export const createMeeting = (input: { meeting_type: "instant" | "scheduled"; title?: string; description?: string; start_time?: string; duration_minutes?: number; client_id?: string; device_id?: string }) =>
   request<Meeting>("/api/meetings", { method: "POST", body: JSON.stringify(input) });
-export const joinMeeting = (code: string, display_name: string, client_id?: string) =>
-  request<{ participant_id: number; display_name: string; role: string }>(`/api/meetings/${encodeURIComponent(code)}/participants`, { method: "POST", body: JSON.stringify({ display_name, client_id }) });
+export const joinMeeting = (code: string, display_name: string, client_id?: string, device_id?: string) =>
+  request<{ participant_id: number; display_name: string; role: string }>(`/api/meetings/${encodeURIComponent(code)}/participants`, { method: "POST", body: JSON.stringify({ display_name, client_id, device_id }) });
 export const leaveMeeting = (code: string, participant_id: number) =>
   request<{ status: string }>(`/api/meetings/${encodeURIComponent(code)}/leave`, { method: "POST", body: JSON.stringify({ participant_id }) });
 export const endMeeting = (code: string) => request<{ status: string }>(`/api/meetings/${encodeURIComponent(code)}/end`, { method: "POST" });
+export const getMeetingIceServers = (code: string, client_id: string) =>
+  request<{ ice_servers: RTCIceServer[] }>("/api/meetings/" + encodeURIComponent(code) + "/ice-servers?client_id=" + encodeURIComponent(client_id));
 export const getMeetingSignals = (code: string, client_id: string, after_id: number) =>
   request<{ signals: MeetingSignal[] }>(`/api/meetings/${encodeURIComponent(code)}/signals?client_id=${encodeURIComponent(client_id)}&after_id=${after_id}`);
 export const sendMeetingSignal = (code: string, from_client_id: string, to_client_id: string, kind: MeetingSignal["kind"], payload: RTCSessionDescriptionInit | RTCIceCandidateInit) =>
   request<{ signal_id: number }>(`/api/meetings/${encodeURIComponent(code)}/signals`, { method: "POST", body: JSON.stringify({ from_client_id, to_client_id, kind, payload }) });
 
 export function getClientId(): string {
-  let clientId = localStorage.getItem("zoom-client-id");
+  let clientId = sessionStorage.getItem("zoom-tab-client-id");
   if (!clientId) {
     clientId = typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
       : `zoom-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    localStorage.setItem("zoom-client-id", clientId);
+    sessionStorage.setItem("zoom-tab-client-id", clientId);
   }
   return clientId;
+}
+
+export function getDeviceId(): string {
+  let deviceId = localStorage.getItem("zoom-device-id");
+  if (!deviceId) {
+    deviceId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem("zoom-device-id", deviceId);
+  }
+  return deviceId;
 }
 
 export function normalizeMeetingCode(value: string): string {
