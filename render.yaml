@@ -9,4 +9,4 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: FRONTEND_ORIGINS
-        value: http://localhost:3000
+        value: http://localhost:3000,https://zoom-clone-basic.vercel.app

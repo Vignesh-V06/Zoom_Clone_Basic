@@ -8,15 +8,21 @@ import { MeetingIcon } from "@/components/MeetingIcons";
 type StartMode = "video-on" | "video-off" | "screen-share";
 type PeerLink = { connection: RTCPeerConnection; audioSender: RTCRtpSender; videoSender: RTCRtpSender };
 
-function StreamVideo({ stream, muted = false }: { stream: MediaStream; muted?: boolean }) {
+function StreamVideo({ stream, audioEnabled }: { stream: MediaStream; audioEnabled: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const trackCount = stream.getTracks().length;
   useEffect(() => {
     if (!videoRef.current) return;
     videoRef.current.srcObject = stream;
     void videoRef.current.play().catch(() => undefined);
   }, [stream, trackCount]);
-  return <video ref={videoRef} autoPlay playsInline muted={muted} />;
+  useEffect(() => {
+    if (!audioRef.current) return;
+    audioRef.current.srcObject = stream;
+    if (audioEnabled) void audioRef.current.play().catch(() => undefined);
+  }, [stream, trackCount, audioEnabled]);
+  return <><video ref={videoRef} autoPlay playsInline muted /><audio ref={audioRef} autoPlay playsInline muted={!audioEnabled} /></>;
 }
 
 export default function MeetingRoomPage() {
@@ -39,6 +45,7 @@ export default function MeetingRoomPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [muted, setMuted] = useState(true);
+  const [audioPlaybackEnabled, setAudioPlaybackEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -242,6 +249,9 @@ export default function MeetingRoomPage() {
   }
 
   async function toggleMute() {
+    // The Join Audio click is also the user gesture browsers require before
+    // allowing remote audio playback on mobile.
+    setAudioPlaybackEnabled(true);
     if (!muted) {
       mediaStream.current?.getAudioTracks().forEach((track) => { track.enabled = false; });
       setMuted(true);
@@ -298,7 +308,7 @@ export default function MeetingRoomPage() {
                 const stream = person.client_id ? remoteStreams[person.client_id] : undefined;
                 const hasVideo = stream?.getVideoTracks().some((track) => track.readyState === "live");
                 return <div className="room-video-tile remote-video-tile" key={person.id}>
-                  {stream && <StreamVideo stream={stream} />}
+                  {stream && <StreamVideo stream={stream} audioEnabled={audioPlaybackEnabled} />}
                   {!hasVideo && <div className="room-self-avatar guest-avatar">{person.display_name.charAt(0).toUpperCase()}</div>}
                   <span className="room-self-name">{person.display_name}{person.role === "host" ? " (Host)" : ""}</span>
                 </div>;

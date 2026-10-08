@@ -72,7 +72,10 @@ class SignalCreate(BaseModel):
 app = FastAPI(title="Zoom Clone API", version="1.0.0")
 frontend_origins = [
     origin.strip()
-    for origin in os.getenv("FRONTEND_ORIGINS", "http://localhost:3000").split(",")
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        "http://localhost:3000,https://zoom-clone-basic.vercel.app",
+    ).split(",")
     if origin.strip()
 ]
 app.add_middleware(
