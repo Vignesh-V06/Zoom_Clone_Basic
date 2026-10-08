@@ -151,3 +151,142 @@ body:has(.zoom-room-app)>main{min-height:0}
 @media(max-width:700px) and (max-height:640px){
   .zoom-meeting-toolbar{height:calc(54px + env(safe-area-inset-bottom));min-height:calc(54px + env(safe-area-inset-bottom))}
 }
+
+
+/* Phone meeting layout: full-width stage, stacked participants, pinned End control. */
+@media (max-width: 700px) {
+  .zoom-room-app {
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+  }
+  .room-layout {
+    display: flex;
+    min-height: 0;
+  }
+  .room-sidebar {
+    display: none;
+  }
+  .room-workspace {
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    flex: 1 1 auto;
+    padding: 0;
+  }
+  .room-appbar {
+    height: 54px;
+    min-height: 54px;
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+  .room-titlebar {
+    height: 42px;
+    min-height: 42px;
+    padding: 0 10px;
+  }
+  .room-title-pill {
+    max-width: calc(100vw - 116px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .room-title-tools { gap: 6px; }
+  .room-title-tools > span:nth-child(2),
+  .room-title-tools .room-title-separator { display: none; }
+  .room-content {
+    flex: 1 1 0;
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
+  .room-self-view { padding: 6px; }
+  .room-video-grid.has-remote {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: minmax(180px, 1fr);
+    align-content: stretch;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .room-video-grid.has-remote .room-video-tile { min-height: 0; }
+  .room-video-tile .room-self-name { left: 8px; bottom: 8px; }
+  .zoom-meeting-toolbar {
+    position: relative;
+    display: flex;
+    flex: 0 0 calc(60px + env(safe-area-inset-bottom));
+    width: 100%;
+    max-width: 100%;
+    min-height: calc(60px + env(safe-area-inset-bottom));
+    justify-content: flex-start;
+    gap: 0;
+    padding: 0 max(54px, env(safe-area-inset-right)) 0 max(3px, env(safe-area-inset-left));
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
+  }
+  .zoom-meeting-toolbar::-webkit-scrollbar { display: none; }
+  .room-toolbar-left,
+  .room-toolbar-center {
+    position: static;
+    flex: none;
+    gap: 0;
+    transform: none;
+  }
+  .room-control-group,
+  .zoom-control {
+    width: 58px;
+    min-width: 58px;
+    height: 58px;
+  }
+  .zoom-control { padding: 4px 1px; }
+  .zoom-control > span { width: 25px; height: 25px; }
+  .zoom-control > span svg { width: 20px; height: 20px; }
+  .zoom-control small,
+  .zoom-end-button small { font-size: 9px; line-height: 12px; }
+  .room-control-group .control-caret { right: -1px; top: 8px; }
+  .zoom-meeting-toolbar > .zoom-end-button {
+    position: absolute;
+    top: 3px;
+    right: max(3px, env(safe-area-inset-right));
+    z-index: 3;
+    width: 48px;
+    min-width: 48px;
+    height: 56px;
+    margin: 0;
+    padding: 3px 0;
+    background: #050505;
+  }
+  .room-message {
+    top: 60px;
+    left: 8px;
+    right: 8px;
+    max-width: none;
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+  .room-details-popover {
+    top: 7px;
+    left: 7px;
+    width: min(320px, calc(100vw - 30px));
+    padding: 18px;
+    gap: 11px;
+  }
+  .camera-preview-card {
+    width: min(440px, 100%);
+    min-height: 0;
+    padding: 22px 14px;
+  }
+}
+@media (max-width: 700px) and (max-height: 640px) {
+  .room-appbar { height: 46px; min-height: 46px; }
+  .room-titlebar { height: 38px; min-height: 38px; }
+  .zoom-meeting-toolbar {
+    flex-basis: calc(54px + env(safe-area-inset-bottom));
+    min-height: calc(54px + env(safe-area-inset-bottom));
+  }
+  .room-video-grid.has-remote { grid-auto-rows: minmax(140px, 1fr); }
+}

@@ -6,7 +6,7 @@ import { endMeeting, formatMeetingTime, getClientId, getMeeting, getMeetingIceSe
 import { MeetingIcon } from "@/components/MeetingIcons";
 
 type StartMode = "video-on" | "video-off" | "screen-share";
-type PeerLink = { connection: RTCPeerConnection; audioSender: RTCRtpSender; videoSender: RTCRtpSender };
+type PeerLink = { connection: RTCPeerConnection; audioSender: RTCRtpSender; videoSender: RTCRtpSender; restartAttempts: number; restarting: boolean };
 
 function StreamVideo({ stream, audioEnabled }: { stream: MediaStream; audioEnabled: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -111,18 +111,46 @@ export default function MeetingRoomPage() {
       const connection = new RTCPeerConnection({ iceServers: iceServers.current });
       const audioSender = connection.addTransceiver("audio", { direction: "sendrecv" }).sender;
       const videoSender = connection.addTransceiver("video", { direction: "sendrecv" }).sender;
-      const link = { connection, audioSender, videoSender };
+      const link = { connection, audioSender, videoSender, restartAttempts: 0, restarting: false };
       peerLinks.current.set(remoteClientId, link);
       const streamForRemote = new MediaStream();
       connection.ontrack = (event) => {
-        const stream = event.streams[0] ?? streamForRemote;
-        if (!event.streams[0] && !stream.getTracks().some((track) => track.id === event.track.id)) stream.addTrack(event.track);
-        setRemoteStreams((current) => ({ ...current, [remoteClientId]: stream }));
+        // Keep one stable stream per peer: browsers may deliver audio and video
+        // as separate track events, sometimes without event.streams populated.
+        if (!streamForRemote.getTracks().some((track) => track.id === event.track.id)) {
+          streamForRemote.addTrack(event.track);
+        }
+        event.track.addEventListener("ended", () => {
+          streamForRemote.removeTrack(event.track);
+          setRemoteStreams((current) => ({ ...current, [remoteClientId]: new MediaStream(streamForRemote.getTracks()) }));
+        }, { once: true });
+        setRemoteStreams((current) => ({ ...current, [remoteClientId]: streamForRemote }));
       };
       connection.onconnectionstatechange = () => {
         if (!disposed && connection.connectionState === "failed") {
-          setError("A media connection failed. This network may require a TURN relay; ask the host to retry.");
+          setError("The media path failed. Retrying the connection; a TURN relay is needed on networks that block direct peer connections.");
         }
+      };
+      connection.oniceconnectionstatechange = () => {
+        // Only the deterministic offerer restarts ICE, preventing both peers
+        // from creating competing restart offers. Retry transient failures.
+        if (disposed || connection.iceConnectionState !== "failed" || clientId.localeCompare(remoteClientId) >= 0 || link.restarting || link.restartAttempts >= 3) return;
+        link.restarting = true;
+        link.restartAttempts += 1;
+        window.setTimeout(() => {
+          void (async () => {
+            try {
+              if (disposed || connection.signalingState !== "stable") return;
+              const restartOffer = await connection.createOffer({ iceRestart: true });
+              await connection.setLocalDescription(restartOffer);
+              await sendMeetingSignal(code, clientId, remoteClientId, "offer", restartOffer);
+            } catch (cause) {
+              console.error("ICE restart failed", cause);
+            } finally {
+              link.restarting = false;
+            }
+          })();
+        }, 800 * link.restartAttempts);
       };
       connection.onicecandidate = (event) => {
         if (event.candidate) void sendMeetingSignal(code, clientId, remoteClientId, "ice", event.candidate.toJSON()).catch(() => undefined);
@@ -199,6 +227,8 @@ export default function MeetingRoomPage() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
       mediaStream.current?.getTracks().forEach((track) => track.stop());
       mediaStream.current = stream;
+      // This click grants the browser gesture needed for remote audio on phones.
+      setAudioPlaybackEnabled(true);
       setMuted(false);
       setCameraOn(true);
       setPreviewOpen(false);
